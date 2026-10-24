@@ -42,7 +42,8 @@ The blank template at `dataset/output.csv` is provided as a reference. Your fina
 ## Implemented agent
 
 The submitted implementation is in `code/main.py` and uses only the Python
-standard library. It:
+standard library. Its default mode is deterministic; optional Gemini evidence
+review is available through `--ai` and `code/gemini_review.py`. The agent:
 
 1. resolves current and historical identifiers from the identity snapshot and
    audit log;
@@ -52,7 +53,8 @@ standard library. It:
    anonymized/redacted/absent records, active data flows, and restore risks;
 5. applies `deletion_rules.csv` to choose deterministic remediation and
    verification operations; and
-6. writes the exact `case_id,deletion_status,steps_json` contract.
+6. optionally asks Gemini to classify retrieved ambiguous evidence in AI mode; and
+7. writes the exact `case_id,deletion_status,steps_json` contract.
 
 Unreadable images and PDFs are not used as proof of completion. This keeps a
 clean run reproducible without credentials or external services.
@@ -71,12 +73,64 @@ python .\code\main.py --requests .\dataset\sample_deletion_requests.csv --output
 python .\code\evaluation\main.py --output .\sample_generated.csv --requests .\dataset\sample_deletion_requests.csv --sample-expected .\dataset\sample_output.csv
 ```
 
+## Optional Gemini evidence review
+
+The default run is local and makes no model calls. Temporary Gemini HTTP 503
+capacity errors are retried twice with a short backoff. To enable Gemini, create an
+API key in [Google AI Studio](https://aistudio.google.com/apikey) and choose a
+model enabled for that key. The integration uses Gemini's `generateContent`
+REST endpoint and forced function-call schema; no extra Python package is required.
+See Google's [API key guide](https://ai.google.dev/gemini-api/docs/api-key),
+[Generate Content API](https://ai.google.dev/api/generate-content), and
+[function calling guide](https://ai.google.dev/gemini-api/docs/generate-content/function-calling).
+
+From PowerShell at the repository root, create the local settings file and
+edit it with the replacement key and a model ID enabled for your account:
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
+
+The repository ignores `.env`, and the program loads it automatically. It is
+still a plain-text file on your computer; use Windows user-level environment
+variables instead if you do not want the key stored in the project folder.
+Never use the key pasted into chat; revoke it and put the replacement in `.env`.
+
+Start with the 32 public sample cases. The AI call limit caps the number of
+evidence-bearing requests reviewed by Gemini:
+
+```powershell
+python .\code\main.py --dataset .\dataset --requests .\dataset\sample_deletion_requests.csv --output .\sample_generated.csv --ai --ai-limit 32
+python .\code\evaluation\main.py --output .\sample_generated.csv --requests .\dataset\sample_deletion_requests.csv --sample-expected .\dataset\sample_output.csv
+```
+
+After reviewing the sample and your available API quota/budget, run all requests
+with `--ai --ai-limit 518`. This can make up to 518 model calls. The program
+sends request text and up to 40 retrieved evidence excerpts per reviewed request
+to Google; excerpts can contain identifiers from the challenge dataset. Python
+still validates the model's evidence indices and preserves directly parsed
+states. Do not use this mode if the dataset must not be sent to an external API.
+
+For estimated costs in `code/evaluation/usage_report.md`, set the model-specific
+rates from [Google's current pricing page](https://ai.google.dev/gemini-api/docs/pricing)
+before the full run. Values are USD per million tokens. Review the data-use terms
+for your API tier: Google's pricing page says free-tier content may be used to
+improve products, while paid-tier content is not used for that purpose.
+
+```powershell
+$env:GEMINI_INPUT_USD_PER_MTOK = Read-Host "Input rate per million tokens"
+$env:GEMINI_OUTPUT_USD_PER_MTOK = Read-Host "Output rate per million tokens"
+```
+
+Never commit the API key or place it in prompts, source files, or `log.txt`.
+
 ## Packaging
 
 Create the HackerRank archive without the dataset or generated output:
 
 ```powershell
-Compress-Archive -Path .\README.md, .\code -DestinationPath .\code.zip -Force
+Compress-Archive -Path .\README.md, .\.env.example, .\code -DestinationPath .\code.zip -Force
 ```
 
 Inspect the archive before uploading and confirm it contains no `dataset`,
@@ -174,13 +228,13 @@ To package `code.zip` from the repository root without bundling the dataset:
 **macOS / Linux:**
 
 ```bash
-zip -r code.zip README.md code -x "*/__pycache__/*" "*/.venv/*" "*/venv/*" "*/node_modules/*" "*/.git/*" "*/.DS_Store"
+zip -r code.zip README.md .env.example code -x "*/__pycache__/*" "*/.venv/*" "*/venv/*" "*/node_modules/*" "*/.git/*" "*/.DS_Store"
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-Compress-Archive -Path README.md, code -DestinationPath code.zip -Force
+Compress-Archive -Path README.md, .env.example, code -DestinationPath code.zip -Force
 ```
 
 When packaging `code.zip`:

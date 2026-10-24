@@ -1,10 +1,13 @@
 # Usage report
 
-The final full-dataset run is local and deterministic:
+The last full-dataset run that produced the checked-in root `output.csv` used
+deterministic mode, with no model calls. Separate sample smoke checks are listed
+below and are not part of the full-dataset totals. One successful smoke check
+used the current Gemini function-call adapter; another earlier check used the
+replaced JSON-text adapter. Failed calls from user-run retries were not captured
+by the runner's completed-run usage report.
 
-```text
-python code/main.py --requests dataset/deletion_requests.csv --output output.csv
-```
+## Last output run
 
 - Model provider: none
 - Model name: none
@@ -16,7 +19,17 @@ python code/main.py --requests dataset/deletion_requests.csv --output output.csv
 - Estimated total cost: $0
 - Estimated cost per request: $0
 
-The agent intentionally does not require credentials or send evidence to an
-external service. An LLM or vision adapter can be added behind the evidence
-extraction boundary later, but policy enforcement, temporal filtering, status
-decisions, output validation, and serialization remain deterministic.
+## Separate sample smoke checks
+
+- Current adapter: Google Gemini API, model `gemini-flash-latest`, 1 successful call, 471 input tokens, 27 output tokens (498 total); generated sample passed the output contract check.
+- Earlier adapter: Google Gemini API, 1 successful call, 324 input tokens, 16 output tokens (340 total); generated sample passed the output contract check.
+- These calls were not part of the full-dataset output run. Their cost was not calculated because model-specific rate settings were not recorded for those runs.
+
+
+## Running with Gemini
+
+Run the full dataset with `--ai --ai-limit 518` after setting `GEMINI_API_KEY`
+and `GEMINI_MODEL`. The runner records actual API calls and token counts. Set
+`GEMINI_INPUT_USD_PER_MTOK` and `GEMINI_OUTPUT_USD_PER_MTOK` to the selected
+model's current rates to write an estimated cost into this report. Sample runs
+do not replace the full-run usage report.

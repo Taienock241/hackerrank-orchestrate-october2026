@@ -1,8 +1,7 @@
-"""Evidence-grounded deletion audit agent.
+"""Evidence-grounded deletion audit agent with optional Gemini evidence review.
 
-The agent is deliberately deterministic. It resolves identities from the supplied
-snapshots, extracts identity/resource links from participant evidence, applies the
-policy table, and serializes the required output contract.
+The default path is deterministic. The --ai option asks Gemini to interpret
+retrieved, identity-linked evidence; local policy and output validation remain in Python.
 """
 
 from __future__ import annotations
@@ -11,12 +10,15 @@ import argparse
 import csv
 import datetime as dt
 import json
+import os
 import re
 import sys
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable
+
+from gemini_review import GeminiEvidenceReviewer
 
 
 STATUS_VALUES = {"COMPLETE", "INCOMPLETE", "NOT_APPLICABLE"}
@@ -104,15 +106,34 @@ def request_authorizes_deletion(text: str) -> bool:
     non_deletion = (
         "access request",
         "access my data",
+        "information request",
+        "not a request to erase",
+        "not asking for deletion",
+        "not asking for erasure",
         "correct my",
         "correction",
+        "misspelled",
+        "resetting the login",
         "export my data",
-        "marketing opt",
         "unsubscribe",
         "do not sell",
         "no destructive action",
+        "still need the account",
+        "still want the account",
     )
     if any(term in lowered for term in non_deletion):
+        return False
+    # Negation must be considered before keyword matching: phrases such as
+    # "don't delete" and "without removing records" are not authorizations.
+    if re.search(
+        r"\b(?:not|never|don't|dont|do not|doesn't|does not|without)\b"
+        r".{0,60}\b(?:delet\w*|eras\w*|remov\w*|purge\w*|clos\w*)",
+        lowered,
+    ):
+        return False
+    if re.search(r"\b(?:marketing|promotional|promotions|advertising)\b.{0,50}\bonly\b", lowered):
+        return False
+    if re.search(r"\b(?:only|just)\b.{0,50}\b(?:marketing|promotional|promotions|advertising)\b", lowered):
         return False
     deletion_terms = (
         "delet",
@@ -133,6 +154,20 @@ def request_authorizes_deletion(text: str) -> bool:
         "удал",
     )
     return any(term in lowered for term in deletion_terms)
+
+
+def extract_log_trace_id(line: str) -> str | None:
+    """Extract a trace/request identifier from common structured log formats."""
+    patterns = (
+        r"\b(?:trace_id|requestId)[\"']?\s*[:=]\s*[\"']?([A-Za-z0-9][A-Za-z0-9._-]{3,})",
+        r"\|\s*((?:tr|rb)-[A-Za-z0-9._-]+)\s*\|",
+        r"\b((?:tr|rb)-[A-Za-z0-9._-]+)\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, line, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
 
 
 def resource_parts(resource_id: str) -> tuple[str, str]:
@@ -247,9 +282,9 @@ class AuditIndex:
                     trace_groups: dict[str, list[str]] = defaultdict(list)
                     ungrouped: list[str] = []
                     for line in content.splitlines():
-                        trace = re.search(r"\btrace_id=([^\s]+)", line)
-                        if trace:
-                            trace_groups[trace.group(1)].append(line)
+                        trace_id = extract_log_trace_id(line)
+                        if trace_id:
+                            trace_groups[trace_id].append(line)
                         elif RESOURCE_RE.search(line):
                             ungrouped.append(line)
                     units = ungrouped + [
@@ -598,7 +633,11 @@ def make_step(
     }
 
 
-def audit_case(row: dict[str, str], index: AuditIndex) -> tuple[str, list[dict[str, object]]]:
+def audit_case(
+    row: dict[str, str],
+    index: AuditIndex,
+    reviewer: GeminiEvidenceReviewer | None = None,
+) -> tuple[str, list[dict[str, object]]]:
     if not request_authorizes_deletion(row.get("request_text", "")):
         return "NOT_APPLICABLE", []
     user_id = index.resolve_user(row.get("email", ""))
@@ -622,7 +661,7 @@ def audit_case(row: dict[str, str], index: AuditIndex) -> tuple[str, list[dict[s
     for resource_id, activity_id in index.linked_resources(user_id, audit_at):
         system_id, prefix = resource_parts(resource_id)
         if resource_id not in by_resource:
-            by_resource[resource_id].append(
+            hits.append(
                 EvidenceHit(
                     activity_id,
                     audit_at,
@@ -639,6 +678,40 @@ def audit_case(row: dict[str, str], index: AuditIndex) -> tuple[str, list[dict[s
                     prefix == "backup",
                 )
             )
+            by_resource[resource_id].append(hits[-1])
+
+    if reviewer is not None and hits:
+        assessments = reviewer.assess(row.get("request_text", ""), row.get("audit_at", ""), hits)
+        state_flags = {
+            "RECORD_PRESENT": {"present": True},
+            "PII_PRESENT": {"present": True, "exposed": True},
+            "ABSENT": {"absent": True, "present": False, "exposed": False},
+            "REDACTED": {"redacted": True, "present": False, "exposed": False},
+            "ANONYMIZED": {"anonymized": True, "present": False, "exposed": False},
+            "ACTIVE_DATA_FLOW": {"active_flow": True},
+            "RESTORE_RISK": {"restore_risk": True},
+        }
+        reviewed_hits = []
+        for hit_index, hit in enumerate(hits):
+            state = assessments.get(hit_index, "UNCERTAIN")
+            explicit_record_state = any((
+                hit.present, hit.exposed, hit.anonymized, hit.redacted, hit.absent,
+            ))
+            flags = state_flags.get(state, {})
+            # Keep parsed record states; allow Gemini to add a process risk because
+            # a record may be present and also exposed to sync or restore.
+            if state == "ACTIVE_DATA_FLOW" and not hit.active_flow:
+                reviewed_hits.append(replace(hit, active_flow=True))
+            elif state == "RESTORE_RISK" and not hit.restore_risk:
+                reviewed_hits.append(replace(hit, restore_risk=True))
+            elif flags and not explicit_record_state and state not in {"ACTIVE_DATA_FLOW", "RESTORE_RISK"}:
+                reviewed_hits.append(replace(hit, **flags))
+            else:
+                reviewed_hits.append(hit)
+        hits = reviewed_hits
+        by_resource = defaultdict(list)
+        for hit in hits:
+            by_resource[hit.resource_id].append(hit)
 
     findings: list[dict[str, object]] = []
     remediation: list[dict[str, object]] = []
@@ -736,12 +809,19 @@ def audit_case(row: dict[str, str], index: AuditIndex) -> tuple[str, list[dict[s
     return ("COMPLETE" if is_complete else "INCOMPLETE"), all_steps
 
 
-def write_output(requests_path: Path, dataset: Path, output_path: Path) -> None:
+def write_output(
+    requests_path: Path,
+    dataset: Path,
+    output_path: Path,
+    reviewer: GeminiEvidenceReviewer | None = None,
+    ai_limit: int = 32,
+) -> None:
     requests = read_csv(requests_path)
     index = AuditIndex(dataset)
     results = []
     for row in requests:
-        status, steps = audit_case(row, index)
+        active_reviewer = reviewer if reviewer and reviewer.calls < ai_limit else None
+        status, steps = audit_case(row, index, active_reviewer)
         results.append(
             {
                 "case_id": row.get("case_id", ""),
@@ -754,6 +834,38 @@ def write_output(requests_path: Path, dataset: Path, output_path: Path) -> None:
         writer = csv.DictWriter(handle, fieldnames=["case_id", "deletion_status", "steps_json"])
         writer.writeheader()
         writer.writerows(results)
+    if reviewer is not None:
+        print(f"Gemini model: {reviewer.model}; API calls: {reviewer.calls}; "
+              f"tokens: {reviewer.input_tokens} input, {reviewer.output_tokens} output")
+
+
+def update_usage_report(path: Path, request_count: int, reviewer: GeminiEvidenceReviewer) -> None:
+    input_rate = os.environ.get("GEMINI_INPUT_USD_PER_MTOK")
+    output_rate = os.environ.get("GEMINI_OUTPUT_USD_PER_MTOK")
+    if input_rate and output_rate:
+        estimated_cost = (
+            reviewer.input_tokens * float(input_rate)
+            + reviewer.output_tokens * float(output_rate)
+        ) / 1_000_000
+        cost_text = f"${estimated_cost:.6f}"
+        per_request = f"${estimated_cost / max(request_count, 1):.8f}"
+        rates_text = f"${input_rate} / ${output_rate} per million input/output tokens"
+    else:
+        cost_text = "Not calculated (set model-specific rate environment variables)"
+        per_request = "Not calculated"
+        rates_text = "Not configured"
+    path.write_text(
+        "# Usage report\n\n"
+        "Final full-dataset run with Gemini API.\n\n"
+        f"- Provider: Google Gemini API\n- Model: {reviewer.model}\n"
+        f"- Requests in dataset: {request_count}\n- Model calls: {reviewer.calls}\n"
+        f"- Input tokens: {reviewer.input_tokens}\n- Output tokens: {reviewer.output_tokens}\n"
+        f"- Total tokens: {reviewer.input_tokens + reviewer.output_tokens}\n"
+        f"- Average tokens per request: {(reviewer.input_tokens + reviewer.output_tokens) / max(request_count, 1):.2f}\n"
+        f"- Input/output rates: {rates_text}\n- Estimated total cost: {cost_text}\n"
+        f"- Estimated cost per request: {per_request}\n",
+        encoding="utf-8",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -761,10 +873,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dataset", type=Path, default=Path("dataset"))
     parser.add_argument("--requests", type=Path)
     parser.add_argument("--output", type=Path, default=Path("output.csv"))
+    parser.add_argument("--ai", action="store_true", help="Use Gemini to interpret retrieved evidence.")
+    parser.add_argument("--ai-limit", type=int, default=32, help="Maximum Gemini API calls (default: 32).")
     args = parser.parse_args(argv)
+    if args.ai_limit < 1:
+        parser.error("--ai-limit must be at least 1")
     dataset = args.dataset
     requests = args.requests or (dataset / "deletion_requests.csv")
-    write_output(requests, dataset, args.output)
+    reviewer = None
+    if args.ai:
+        from gemini_review import configured_reviewer
+        try:
+            reviewer = configured_reviewer()
+        except ValueError as exc:
+            parser.error(str(exc))
+    write_output(requests, dataset, args.output, reviewer, args.ai_limit)
+    if reviewer is not None and args.output.name == "output.csv" and len(read_csv(requests)) == 518:
+        update_usage_report(Path("code/evaluation/usage_report.md"), 518, reviewer)
     return 0
 
 
