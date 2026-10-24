@@ -39,6 +39,49 @@ python3 code/main.py
 
 The blank template at `dataset/output.csv` is provided as a reference. Your final generated file for submission must be the root-level `output.csv`.
 
+## Implemented agent
+
+The submitted implementation is in `code/main.py` and uses only the Python
+standard library. It:
+
+1. resolves current and historical identifiers from the identity snapshot and
+   audit log;
+2. reads participant-visible text and SQL evidence and the evidence manifest;
+3. ignores evidence captured after each case's `audit_at`;
+4. links identifiers to resource IDs and systems, recognizes residual PII,
+   anonymized/redacted/absent records, active data flows, and restore risks;
+5. applies `deletion_rules.csv` to choose deterministic remediation and
+   verification operations; and
+6. writes the exact `case_id,deletion_status,steps_json` contract.
+
+Unreadable images and PDFs are not used as proof of completion. This keeps a
+clean run reproducible without credentials or external services.
+
+Use these Windows commands from the repository root:
+
+```powershell
+python .\code\main.py --requests .\dataset\deletion_requests.csv --output .\output.csv
+python .\code\evaluation\main.py --output .\output.csv --requests .\dataset\deletion_requests.csv
+```
+
+The public sample can be evaluated separately:
+
+```powershell
+python .\code\main.py --requests .\dataset\sample_deletion_requests.csv --output .\sample_generated.csv
+python .\code\evaluation\main.py --output .\sample_generated.csv --requests .\dataset\sample_deletion_requests.csv --sample-expected .\dataset\sample_output.csv
+```
+
+## Packaging
+
+Create the HackerRank archive without the dataset or generated output:
+
+```powershell
+Compress-Archive -Path .\README.md, .\code -DestinationPath .\code.zip -Force
+```
+
+Inspect the archive before uploading and confirm it contains no `dataset`,
+virtual environment, cache, nested archive, or secret files.
+
 
 ## Dataset
 
