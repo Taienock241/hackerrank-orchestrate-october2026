@@ -345,3 +345,33 @@ branch=main
 repo_root=C:\Users\taien\Desktop\Container\hackerrank-orchestrate-october26
 worktree=C:\Users\taien\Desktop\Container\hackerrank-orchestrate-october26
 parent_agent=none
+## [2026-11-01T20:50:26Z] Add illustrative diagrams to README
+
+User Prompt (verbatim, secrets redacted):
+# Context from my IDE setup:
+
+## Active file: AGENTS.md
+## Open tabs:
+- AGENTS.md: AGENTS.md
+- CLAUDE.md: CLAUDE.md
+- output.csv: output.csv
+- README.md: README.md
+- deletion_requests.csv: dataset/deletion_requests.csv
+
+## My request:
+to the readme.md  of this project can you add some diagrams for illustration
+
+Agent Response Summary:
+Added two Mermaid diagrams to the README: one showing the per-request audit decisions and output, and one showing the evidence and policy inputs used by the agent. Kept the diagrams aligned with the implementation and documented audit contract.
+
+Actions:
+* Read AGENTS.md, README.md, and inspected code/main.py flow.
+* Edited README.md.
+
+Context:
+tool=Codex
+model=GPT-6
+branch=main
+repo_root=C:\Users\taien\Desktop\Container\hackerrank-orchestrate-october26
+worktree=C:\Users\taien\Desktop\Container\hackerrank-orchestrate-october26
+parent_agent=none

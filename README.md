@@ -59,6 +59,46 @@ review is available through `--ai` and `code/gemini_review.py`. The agent:
 Unreadable images and PDFs are not used as proof of completion. This keeps a
 clean run reproducible without credentials or external services.
 
+### Audit flow
+
+The agent first checks whether deletion was requested. For authorized requests,
+it links current and historical identifiers to evidence, applies the policy,
+and produces the status and ordered steps for the requested audit cutoff.
+
+```mermaid
+flowchart TD
+    A[Deletion request] --> B{Does the text authorize deletion?}
+    B -- No --> C[NOT_APPLICABLE<br/>steps_json is empty]
+    B -- Yes --> D[Resolve current and historical identifiers]
+    D --> E[Retrieve linked evidence available by audit_at]
+    E --> F[Apply deletion rules to each record and process]
+    F --> G{Compliant state and no recreation risk?}
+    G -- Yes --> H[COMPLETE<br/>Evidence-backed verification]
+    G -- No --> I[INCOMPLETE<br/>Findings, ordered remediation, future checks]
+    H --> J[Write output.csv row]
+    I --> J
+    C --> J
+```
+
+### Evidence and decision inputs
+
+The audit combines request data, identity history, policy, global activity, and
+the evidence manifest. The manifest locates files; the agent links their
+contents using identifiers, resource IDs, timestamps, and other evidence.
+
+```mermaid
+flowchart LR
+    R[Request<br/>email, request_text, audit_at] --> A[Audit case]
+    U[Current identities] --> A
+    H[Identity audit history] --> A
+    P[Deletion rules] --> A
+    S[System activity] --> A
+    M[Evidence manifest] --> E[Evidence files<br/>text, logs, SQL]
+    E --> A
+    A --> O[Status and ordered steps]
+    O --> CSV[output.csv]
+```
+
 Use these Windows commands from the repository root:
 
 ```powershell
